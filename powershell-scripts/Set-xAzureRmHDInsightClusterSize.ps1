@@ -8,8 +8,7 @@
     .PARAMETER ConfigurationFile
     The URL to the XML configuration file stored in Azure Blob Storage that contains information on the cluster, the subscription in which it resides, min and max worker nodes.
 
-
-    @"
+@"
 <ClusterConfiguration>
      <SubscriptionName>MySubscriptionName</SubscriptionName>
      <ResourceGroupName>MY-RG-0001</ResourceGroupName>
@@ -18,8 +17,9 @@
      <MaxWorkers>3</MaxWorkers>
      <Notify>hadoopsupport@acme.com,team@acme.com</Notify>
 </ClusterConfiguration>
-    "@ | Out-File DSO-ClusterConfigurationFile.xml
+"@ | Out-File DSO-ClusterConfigurationFile.xml
     
+    Ensure the file is in UTF-8 format and there are no extra newlines at the start or end of the file.
 
     .PARAMETER ScaleOperation
 
@@ -40,14 +40,14 @@
     File containing the credentials to use to connect to send emails. This file should reside in the same directory as the script and be named email-credential.xml
     The contents of the file should be as follows  - this needs to be done under the context of the user that the script will run as (e.g. start powershell using runas and then execute the command below):
 
-    <credentials> 
-    <credential> 
-    <username>emailaccount@acme.onmicrosoft.com</username>
-    <password>ReplaceWithActualPassword</password> 
-    </credential>      
+    <credentials>
+        <credential>
+            <username>emailaccount@acme.onmicrosoft.com</username>
+            <password>ReplaceWithActualPassword</password>
+        </credential>
     </credentials>
 
-    For example, runas /user:SVC-RTE-PSAutomation powershell.exe
+    For example, runas /user:SVC-PSAutomation powershell.exe
     PS C:\Scripts> ConvertTo-SecureString 'aRandomPassword' -AsPlainText -Force | ConvertFrom-SecureString
 
     The password should be created as follows - this needs to be done under the context of the user that the script will run as (e.g. start powershell using runas and then execute the command below):
@@ -77,19 +77,19 @@
 [CmdletBinding()]
 Param(
   [Parameter(Mandatory = $true)]
-  [String]$ConfigurationFileURL,
+    [String]$ConfigurationFileURL,
   [Parameter(Mandatory = $true)]
-  [ValidateSet('ScaleOut','ScaleIn')]
-  [String]$ScaleOperation,
+      [ValidateSet('ScaleOut','ScaleIn')]
+      [String]$ScaleOperation,
   [Parameter(Mandatory = $true)]
-  [String]$StorageAccountSubscription,
+    [String]$StorageAccountSubscription,
   [Parameter(Mandatory=$true)]
-  [ValidateSet('Office365','SendGrid','InternalUSMail','InternalUKMail')]
-  [string]$EmailProvider,
+    [ValidateSet('Office365','SendGrid','InternalMail','DisableEmailAlerts')]
+    [string]$EmailProvider,
   [Parameter(Mandatory=$false)]
-  [String]$EmailCredentialFile,
+    [String]$EmailCredentialFile,
   [Parameter(Mandatory = $false)]
-  [Switch]$Test = $false
+    [Switch]$Test = $false
 )
 
 #region --- VARIABLES ---
@@ -113,7 +113,8 @@ $EmailRecipients = $null
 
 $Message = $null
 
-$InternalDomainList = @('acme.int', 'blah.acme.int') 
+$InternalDomainList = @('WORKGROUP','acme.int', 'blah.acme.int') 
+$DefaultEmailRecipient = 'default@acme.com'
 
 #endregion
 
@@ -142,12 +143,7 @@ Function Get-ConfigurationFileStorageAccountKey
   
   If($StorageAccount -eq $null)
   {
-    Write-Verbose -Message "The storage account $StorageAccountName is a classic storage account"
-    Set-AzureSubscription -SubscriptionName $StorageAccountSubscription
-    Select-AzureSubscription -SubscriptionName $StorageAccountSubscription
-    $StorageAccountKey = (Get-AzureStorageKey -StorageAccountName $StorageAccountName).Secondary
-    #$Resource = Get-AzureRmResource  | ? { $_.Name -eq "automationrepository" }
-    #$StorageAccountKey = (Get-AzureRmStorageAccountKey -ResourceGroupName $Resource.ResourceGroupName -Name $Resource.Name)[1].Value
+    Throw "The storage account $StorageAccountName is a classic storage account, unable to continue."
   }
   Else
   {
@@ -272,7 +268,7 @@ Function Send-EmailAlert
   [CmdletBinding()]
   Param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet('Office365','SendGrid','InternalUSMail','InternalUKMail')]
+    [ValidateSet('Office365','SendGrid','InternalMail','DisableEmailAlerts')]
     [string]$EmailProvider,
     [Parameter(Mandatory = $true)]
     [String]$Message,
@@ -286,6 +282,12 @@ Function Send-EmailAlert
   $SendEmailParameters = @{}
   $SendEmailParameters.Add('Subject',$EmailSubject)
   
+  # If email alerts are disabled just return immediately
+  If($EmailProvider -eq 'DisableEmailAlerts')
+  {
+    return $null
+  }
+
   # Internally the mail servers do not require auth so we don't need to bother with adding credentials (!!!)
   If($EmailProvider -eq 'Office365')
   { 
@@ -319,15 +321,9 @@ Function Send-EmailAlert
     }
     $SendEmailParameters.Add('Credential',$EmailCredentials)
   }
-  ElseIf($EmailProvider -eq 'InternalUSMail')
+  ElseIf($EmailProvider -eq 'InternalMail')
   { 
       $SendEmailParameters.Add('smtpServer','mail.us.acme.com')
-      $SendEmailParameters.Add('Port',25)
-      $SendEmailParameters.Add('from','support@acme.com')        
-  }
-  ElseIf($EmailProvider -eq 'InternalUKMail')
-  { 
-      $SendEmailParameters.Add('smtpServer','mail.uk.acme.com')
       $SendEmailParameters.Add('Port',25)
       $SendEmailParameters.Add('from','support@acme.com')        
   }
@@ -358,7 +354,7 @@ $Message
 
   If($ValidatedEmailRecipients.Count -eq 0)
   {
-    $ValidatedEmailRecipients = @('default@acme.com')
+    $ValidatedEmailRecipients = @("$($Script:DefaultEmailRecipient)")
   }
 
   $SendEmailParameters.Add('To',$ValidatedEmailRecipients)
@@ -374,6 +370,8 @@ $Message
 #endregion
 
 #region --- MAIN PROGRAM ---
+
+$StartTime = Get-Date
 
 If( -not($PSPrivateMetadata.JobId) ) 
 {
@@ -412,35 +410,6 @@ catch
     Write-Error -Message $_.Exception
     throw $_.Exception    
 }
-  
-try
-{
-    'Logging in to Azure (Classic)...'
-    If( $InternalDomainList -contains $Domain )
-    {
-        try
-        {
-            Write-Output 'Checking if you have been authenticated against Azure using Add-AzureAccont.'        
-            $AuthCheck1 = Get-AzureSubscription -ExtendedDetails -Current -ErrorAction Continue
-        }
-        catch
-        {
-            Add-AzureAccont
-        }
-    }
-    Else
-    {
-        $CredentialObject = Get-AutomationPSCredential -Name $CredentialName 
-        Add-AzureAccount -Credential  $CredentialObject
-    }
-
-}
-catch 
-{
-    Write-Error -Message $_.Exception
-    throw $_.Exception    
-}
-
 
 
 # If we're not running in Azure automation and we're using SendGrid or Office365 then a email credential XML file must be provided as a parameter
@@ -472,9 +441,10 @@ $EmailRecipients = $ConfigurationXML.ClusterConfiguration.Notify -split ','
 
 If($EmailRecipients -eq $null)
 {
-    $EmailRecipients = @('default@acme.com')
+    $EmailRecipients = @("$($Script:DefaultEmailRecipient)")
 }
 
+Write-Output "Cluster Scaling Script Configuration Info:"
 $ConfigurationInfo = (@'
 
 Subscription: {0}
@@ -494,7 +464,7 @@ try
 catch 
 {
   $Message = "The specified subscription $ClusterSubscription was not found. Please verify that it exists in this tenant and that you have permissions to access it."
-  Send-EmailAlert -EmailProvider SendGrid -Message $Message -EmailRecipients $EmailRecipients
+  Send-EmailAlert -EmailProvider $EmailProvider -Message $Message -EmailRecipients $EmailRecipients
   Write-Error $Message
 }
 
@@ -503,6 +473,9 @@ catch
 $HDInsightClusterDetails = Get-AzureRmHDInsightCluster | Where-Object {
   $_.Name -eq $ClusterName 
 }
+
+$ClusterLocation = $HDInsightClusterDetails.Location
+
 $ClusterSpec = Get-AzureRmResource -ResourceId $HDInsightClusterDetails.Id |
 Select-Object -ExpandProperty Properties |
 Select-Object -ExpandProperty computeProfile
@@ -511,15 +484,15 @@ Select-Object -ExpandProperty computeProfile
 $WorkerNodeSpec = $ClusterSpec.roles | Where-Object {
   $_.name -eq 'workernode' 
 }
-$WorkerNodeRole = Get-AzureRoleSize | Where-Object {
-  $_.InstanceSize -eq $WorkerNodeSpec.hardwareProfile.vmSize 
+$WorkerNodeRole = Get-AzureRmVmSize -Location $ClusterLocation | Where-Object {
+  $_.Name -eq $WorkerNodeSpec.hardwareProfile.vmSize 
 }
 
 $HeadNodeSpec = $ClusterSpec.roles | Where-Object {
   $_.name -eq 'headnode' 
 }
-$HeadNodeRole = Get-AzureRoleSize | Where-Object {
-  $_.InstanceSize -eq $WorkerNodeSpec.hardwareProfile.vmSize 
+$HeadNodeRole = Get-AzureRmVmSize -Location $ClusterLocation | Where-Object {
+  $_.Name -eq $WorkerNodeSpec.hardwareProfile.vmSize 
 }
 $HeadNodeInstanceCount = $HeadNodeSpec.targetInstanceCount
 
@@ -537,10 +510,10 @@ $Message = (@'
 
 Cluster currently consists of:
  {0} x {1} worker nodes with {2} cores each.
- {3} x {4} worker nodes with {5} cores each.
+ {3} x {4} head nodes with {5} cores each.
  Total cores used: {6}.
  Total core quota: {7}.
-'@ -f $CurrentWorkerNodeInstanceCount, $WorkerNodeSpec.hardwareProfile.vmSize, $WorkerNodeRole.Cores, $HeadNodeInstanceCount, $HeadNodeSpec.hardwareProfile.vmSize, $HeadNodeRole.Cores, $HDInsightClusterDetails.CoresUsed, ($QuotaInfo['CoresAvailable']))
+'@ -f $CurrentWorkerNodeInstanceCount, $WorkerNodeSpec.hardwareProfile.vmSize, $WorkerNodeRole.NumberOfCores, $HeadNodeInstanceCount, $HeadNodeSpec.hardwareProfile.vmSize, $HeadNodeRole.NumberOfCores, $HDInsightClusterDetails.CoresUsed, ($QuotaInfo['CoresAvailable']))
 
 Write-Output $Message
 
@@ -550,7 +523,7 @@ If( $ScaleOperation -eq 'ScaleOut' )
 {
   If( $CurrentWorkerNodeInstanceCount -lt $ClusterMaxWorkers )
   {
-    $TotalCoresAfterScaling = ( $HeadNodeInstanceCount * $HeadNodeRole.Cores ) + ( $ClusterMaxWorkers * $WorkerNodeRole.Cores )
+    $TotalCoresAfterScaling = ( $HeadNodeInstanceCount * $HeadNodeRole.NumberOfCores ) + ( $ClusterMaxWorkers * $WorkerNodeRole.NumberOfCores )
     Write-Output "Total cluster cores after scaling $TotalCoresAfterScaling."
     If( $TotalCoresAfterScaling -gt $QuotaInfo['CoresAvailable'])
     {
@@ -563,6 +536,7 @@ If( $ScaleOperation -eq 'ScaleOut' )
       If( $Script:Test )
       {
         $Message = "TEST MODE: scaling operation will NOT be performed, but the cluster would have been scaled out to $ClusterMaxWorkers"          
+        Write-Output $Message
         Send-EmailAlert -EmailProvider $EmailProvider -Message $Message -EmailRecipients $EmailRecipients
         Write-Output ''          
       }
@@ -589,6 +563,7 @@ ElseIf( $ScaleOperation -eq 'ScaleIn' )
     If( $Script:Test )
     {
       $Message = "TEST MODE: scaling operation will NOT be performed, but the cluster would have been scaled in (reduced in size) to $ClusterMinWorkers"          
+      Write-Output $Message
       Send-EmailAlert -EmailProvider $EmailProvider -Message $Message -EmailRecipients $EmailRecipients
       Write-Output ''          
     }
@@ -607,5 +582,10 @@ ElseIf( $ScaleOperation -eq 'ScaleIn' )
     Write-Error $Message
   }    
 }
+
+$EndTime = Get-Date
+$RunTime = $EndTime - $StartTime
+
+Write-Output "Script completed in: Days: $($RunTime.Days) Hours:  $($RunTime.Hours) Minutes: $($RunTime.Minutes) Seconds: $($RunTime.Seconds)"
 
 #endregion
